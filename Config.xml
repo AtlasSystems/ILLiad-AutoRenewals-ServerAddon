@@ -1,0 +1,26 @@
+<Configuration>
+  <Name>ILLiad AutoRenewals Server Addon</Name>
+  <Author>Atlas Systems, Inc.</Author>
+  <Version>1.1.0</Version>
+  <Active>true</Active>
+  <Type>Server</Type>
+  <Description>Automatically handles renewals of borrowing and lending requests.</Description>
+  <Settings>
+    <Setting name="BorrowingEnabled" value="true" type="boolean">
+      <Description>Controls whether borrowing requests are processed for automatical renewal.</Description>
+    </Setting>
+    <Setting name="LendingEnabled" value="true" type="boolean">
+      <Description>Controls whether lending requests are processed for automatical renewal.</Description>
+    </Setting>
+    <Setting name="LendingRenewalDueDate" value="" type="string">
+      <Description>Specifies a renewal due date for Lending requests. If this is blank, the addon will default to use the normal due date plus the number of days defined in the LendingRenewalDateDays customization key. If a date is provided for this setting, the addon will consider the provided date and the default date and will prefer the later of the two. Example: "2020-04-15"</Description>
+    </Setting>
+    <Setting name="NVTGC" value="" type="string">
+      <Description>Comma-separated list of NVTGCs to process. Please list out all NVTGCs as they would appear in the NVTGC field on the User form. If left blank, the addon will process transactions from all NVTGCs.</Description>
+    </Setting>  </Settings>
+  <Forms />
+  <Files>
+    <File>AutoRenewals.lua</File>
+    <File>RestrictedCommands.elf</File>
+  </Files>
+</Configuration>
