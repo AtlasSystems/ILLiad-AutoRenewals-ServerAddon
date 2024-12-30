@@ -9,6 +9,11 @@ Types["log4net.LogManager"] = luanet.import_type("log4net.LogManager");
 local Settings = {};
 Settings.BorrowingEnabled = nil;
 Settings.LendingEnabled = nil;
+Settings.BorrowingRenewalApprovedEmail = nil;
+Settings.BorrowingRenewalApprovedEmailLibraryUse = nil;
+Settings.BorrowingRenewalDeniedEmail = nil;
+Settings.BorrowingRenewalDeniedEmailLibraryUse = nil;
+Settings.BorrowingAllowFurtherRenewals = nil;
 Settings.LendingRenewalDueDate = nil;
 Settings.ActiveNvtgcs = {};
 Settings.SharedServer = nil;
@@ -28,6 +33,11 @@ end
 function LoadSettings()
 	Settings.BorrowingEnabled = GetSetting("BorrowingEnabled");
 	Settings.LendingEnabled = GetSetting("LendingEnabled");
+	Settings.BorrowingRenewalApprovedEmail = GetSetting("BorrowingRenewalApprovedEmail");
+	Settings.BorrowingRenewalApprovedEmailLibraryUse = GetSetting("BorrowingRenewalApprovedEmailLibraryUse");
+	Settings.BorrowingRenewalDeniedEmailLibraryUse = GetSetting("BorrowingRenewalDeniedEmailLibraryUse");
+	Settings.BorrowingRenewalDeniedEmail = GetSetting("BorrowingRenewalDeniedEmail");
+	Settings.BorrowingAllowFurtherRenewals = GetSetting("BorrowingAllowFurtherRenewals");
 	
 	--Load the lending due date setting and confirm it is a valid date. Use default value (nil) and log error message otherwise
 	local dueDate = GetSetting("LendingRenewalDueDate");
@@ -69,14 +79,14 @@ function ProcessAutoRenewals()
 		isCurrentlyProcessing = true;
 		
 		local success = pcall(function() 
-								if (Settings.BorrowingEnabled) then
-									ProcessBorrowingAutoRenewals();
-								end;
-								
-								if (Settings.LendingEnabled) then
-									ProcessLendingAutoRenewals();
-								end;
-							   end);
+			if (Settings.BorrowingEnabled) then
+				ProcessBorrowingAutoRenewals();
+			end;
+			
+			if (Settings.LendingEnabled) then
+				ProcessLendingAutoRenewals();
+			end;
+		end);
 
 		if (success) then
 			log:Info("Successfully processed renewals.");
@@ -94,7 +104,7 @@ end
 function ProcessBorrowingAutoRenewals()
 	log:Info("Processing Borrowing autorenewals");
 	
-	local success;	
+	local success, error;
 	
 	success, error = pcall(function() ProcessDataContexts("TransactionStatus", "Renewal Requested", "HandleBorrowingRenewal") end);
 	
@@ -105,15 +115,21 @@ function ProcessBorrowingAutoRenewals()
 	if (success) then
 		success, error = pcall(function() ProcessDataContexts("TransactionStatus", "Renewed by ILL Staff to%", "HandleBorrowingRenewal") end);
 	end
+
+	if (success) then
+		success, error = pcall(function() ProcessDataContexts("TransactionStatus", "Awaiting Renewal OK Processing", "HandleBorrowingRenewalApproval") end);
+	end
+
+	if (success) then
+		success, error = pcall(function() ProcessDataContexts("TransactionStatus", "Awaiting Denied Renewal Processing", "HandleBorrowingRenewalDenial") end);
+	end
 	
 	if (not success) then
 		log:Error("An error occurred while autorenewing user requests.");
 		log:Error(error.Message or error);
 	else
-		log:Info("Successfully processed Borrowing renewals");	
+		log:Info("Successfully processed Borrowing renewals");
 	end
-	
-	isProcessingBorrowing = false;
 end
 
 function ProcessLendingAutoRenewals()
@@ -258,5 +274,174 @@ function HandleBorrowingRenewal()
 	RestrictedCommands:RequestRenewal(tn);
 	ExecuteCommand("Route", {tn, "Checked Out to Customer"});
 	
-	RestrictedCommands:AddEventLogEntry("Renewals", "Renewals sent to table for OCLC updating.");
+	RestrictedCommands:AddEventLogEntry("Renewals", "Renewals sent to table for OCLC updating.", "AutoRenewals Addon");
+end
+
+function HandleBorrowingRenewalApproval()
+	local transactionNumber = GetFieldValue("Transaction", "TransactionNumber");
+	local libraryUseOnly = GetFieldValue("Transaction", "libraryUseOnly");
+	local systemId = GetFieldValue("Transaction", "SystemID");
+
+	local connection = CreateManagedDatabaseConnection();
+
+	local success, transactionDataOrErr = pcall(function()
+		connection:Connect();
+
+		local queryString = "SELECT TOP 1 Note, ChangedTo FROM Notes INNER JOIN Tracking ON Tracking.TransactionNumber = Notes.TransactionNumber WHERE Notes.TransactionNumber = '" .. transactionNumber .. "' AND (Note LIKE 'Renewal Due Date: %' OR Note LIKE 'Due Date updated to match RAPID due date of %') AND (ChangedTo = 'Checked Out to Customer' OR ChangedTo = 'Customer Notified via E-Mail') ORDER BY NoteDate, DateTime DESC";
+
+		log:Debug("Querying the database with querystring: " .. queryString);
+
+		connection.QueryString = queryString;
+        local queryResults = connection:Execute();
+
+		local transactionData = {};
+		transactionData["note"] = queryResults.Rows:get_Item(0):get_Item("Note");
+		transactionData["queueBeforeRenewal"] = queryResults.Rows:get_Item(0):get_Item("ChangedTo");
+
+		return transactionData;
+	end);
+
+	connection:Dispose();
+
+	if success then
+		local newDueDate;
+		local note = transactionDataOrErr["note"];
+
+		-- Rapid renewals already have their due dates updated by the Rapid Manager.
+		if systemId == "OCLC" then
+			local year, month, day = note:match("Renewal Due Date: (%d%d%d%d)(%d%d)(%d%d)");
+			newDueDate = month .. "/" .. day .. "/" .. year;
+
+			SetFieldValue("Transaction", "DueDate", newDueDate);
+		end
+	
+		
+		if Settings.BorrowingAllowFurtherRenewals then
+			SetFieldValue("Transaction", "RenewalsAllowed", true);
+		end
+	
+		if libraryUseOnly then
+			ExecuteCommand("SendTransactionNotification", {transactionNumber, Settings.BorrowingRenewalApprovedEmailLibraryUse});
+		else
+			ExecuteCommand("SendTransactionNotification", {transactionNumber, Settings.BorrowingRenewalApprovedEmail});
+		end
+	
+		ExecuteCommand("Route", {transactionNumber, transactionDataOrErr["queueBeforeRenewal"]});
+	
+		SaveDataSource("Transaction");
+	else
+		log:Error("An error occurred when retrieving transaction info from the database: " .. tostring(TraverseError(transactionDataOrErr)));
+	end
+end
+
+function HandleBorrowingRenewalDenial()
+	local transactionNumber = GetFieldValue("Transaction", "TransactionNumber");
+	local systemId = GetFieldValue("Transaction", "SystemID");
+	local libraryUseOnly = GetFieldValue("Transaction", "libraryUseOnly");
+
+	log:Debug("Processing denied " .. systemId .. " renewal for transaction " .. transactionNumber .. ".");
+
+	local connection = CreateManagedDatabaseConnection();
+
+	local success, transactionDataOrErr = pcall(function()
+		connection:Connect();
+
+		local queryString;
+
+		if systemId == "OCLC" then
+			queryString = "SELECT TOP 1 Note, ChangedTo FROM Notes INNER JOIN Tracking ON Tracking.TransactionNumber = Notes.TransactionNumber WHERE Notes.TransactionNumber = '" .. transactionNumber .. "' AND Note LIKE 'Renewal Denied - Due Date: %' AND (ChangedTo = 'Checked Out to Customer' OR ChangedTo = 'Customer Notified via E-Mail') ORDER BY NoteDate, DateTime DESC";
+
+		elseif systemId == "RAPID" then
+			queryString = "SELECT TOP 1 ChangedTo FROM Tracking WHERE TransactionNumber = '" .. transactionNumber .. "' AND (ChangedTo = 'Checked Out to Customer' OR ChangedTo = 'Customer Notified via E-Mail') ORDER BY  DateTime DESC";
+		else
+			error("SystemID " .. systemId .. " renewals are not supported by the AutoRenewals addon.");
+		end
+
+		log:Debug("Querying the database with querystring: " .. queryString);
+
+		connection.QueryString = queryString;
+        local queryResults = connection:Execute();
+
+		local transactionData = {};
+
+		if systemId == "OCLC" then
+			transactionData["note"] = queryResults.Rows:get_Item(0):get_Item("Note");
+		end
+		transactionData["queueBeforeRenewal"] = queryResults.Rows:get_Item(0):get_Item("ChangedTo");
+
+		-- A bug prevents the original due date from being sent in the note when OCLC renewals are denied, so we can get the original due date from the history entry.
+		if systemId == "OCLC" then
+			queryString = "SELECT TOP 1 Entry FROM History WHERE TransactionNumber = " .. transactionNumber .. " AND Entry LIKE '%Original Due Date:%' ORDER BY DateTime DESC";
+			log:Debug("Querying the database with querystring: " .. queryString);
+
+			connection.QueryString = queryString;
+			transactionData["originalDueDateEntry"] = connection:ExecuteScalar();
+		end
+
+		return transactionData;
+	end);
+
+	connection:Dispose();
+
+	-- The Rapid Manager sets the due date for denied Rapid renewals, so we only have to set it for OCLC.
+	local newDueDate;
+	if systemId == "OCLC" then
+		local year, month, day = transactionDataOrErr["note"]:match("Renewal Denied %- Due Date: (%d%d%d%d)(%d%d)(%d%d)");
+		if year then
+			newDueDate = month .. "/" .. day .. "/" .. year;
+			log:Debug("Due date found in note.");
+
+			SetFieldValue("Transaction", "DueDate", newDueDate);
+		elseif transactionDataOrErr["originalDueDateEntry"] and transactionDataOrErr["originalDueDateEntry"]:find("%d+/%d+/%d%d%d%d") then
+			newDueDate = transactionDataOrErr["originalDueDateEntry"]:match("%d+/%d+/%d%d%d%d");
+			log:Debug("Due date not found in note. Using original due date from history entry.");
+
+			SetFieldValue("Transaction", "DueDate", newDueDate);
+		end
+
+		if newDueDate then
+			log:Debug("Updating due date for transaction " .. transactionNumber .. " to " .. newDueDate .. ".");
+		else
+			log:Warn("Due date not found in note or history entry. Due date for transaction " .. transactionNumber .. " will not be updated.");
+		end
+	end
+
+	if success then
+		if libraryUseOnly then
+			ExecuteCommand("SendTransactionNotification", {transactionNumber, Settings.BorrowingRenewalDeniedEmailLibraryUse});
+		else
+			ExecuteCommand("SendTransactionNotification", {transactionNumber, Settings.BorrowingRenewalDeniedEmail});
+		end
+
+		ExecuteCommand("Route", {transactionNumber, transactionDataOrErr["queueBeforeRenewal"]});
+		SaveDataSource("Transaction");
+	else
+		log:Error("An error occurred when retrieving transaction info from the database: " .. tostring(TraverseError(transactionDataOrErr)));
+	end
+end
+
+function TraverseError(e)
+    if not e.GetType then
+        -- Not a .NET type
+        return e;
+    else
+        if not e.Message then
+            -- Not a .NET exception
+            return e;
+        end
+    end
+
+    log:Debug(e.Message);
+
+    if e.InnerException then
+        return TraverseError(e.InnerException);
+    else
+        return e.Message;
+    end
+end
+
+function OnError(err)
+    -- To ensure the addon doesn't get stuck in processing if it encounters an error.
+    isCurrentlyProcessing = false;
+    log:Error(tostring(TraverseError(err)));
 end
