@@ -241,17 +241,7 @@ function HandleBorrowingRenewal()
 	
 	log:Debug("Handling borrowing renewal for transaction " .. tn);
 	
-	--Confirm the request in context is appropriate to process
-	if string.lower(GetFieldValue("Transaction", "ProcessType")) == "lending" then
-		log:Debug("Not a borrowing request.");
-		return
-	end
-	
-	--User's nvtgc is in list of sites/delivery locations to process
-	local userNvtgc = AtlasHelpers.Trim(string.upper(GetFieldValue("User", "NVTGC")));
-	
-	if (not ShouldHandleRequest(userNvtgc)) then
-		log:Debug("User's NVTGC (" .. userNvtgc .. ") will not be processed.");
+	if not ShouldBorrowingRequestBeProcessed() then
 		return;
 	end
 
@@ -278,9 +268,15 @@ function HandleBorrowingRenewal()
 end
 
 function HandleBorrowingRenewalApproval()
+	if not ShouldBorrowingRequestBeProcessed() then
+		return;
+	end
+
 	local transactionNumber = GetFieldValue("Transaction", "TransactionNumber");
 	local libraryUseOnly = GetFieldValue("Transaction", "libraryUseOnly");
 	local systemId = GetFieldValue("Transaction", "SystemID");
+
+	log:Debug("Processing approved " .. systemId .. " renewal for transaction " .. transactionNumber .. ".");
 
 	local connection = CreateManagedDatabaseConnection();
 
@@ -335,6 +331,10 @@ function HandleBorrowingRenewalApproval()
 end
 
 function HandleBorrowingRenewalDenial()
+	if not ShouldBorrowingRequestBeProcessed() then
+		return;
+	end
+
 	local transactionNumber = GetFieldValue("Transaction", "TransactionNumber");
 	local systemId = GetFieldValue("Transaction", "SystemID");
 	local libraryUseOnly = GetFieldValue("Transaction", "libraryUseOnly");
@@ -418,6 +418,24 @@ function HandleBorrowingRenewalDenial()
 	else
 		log:Error("An error occurred when retrieving transaction info from the database: " .. tostring(TraverseError(transactionDataOrErr)));
 	end
+end
+
+function ShouldBorrowingRequestBeProcessed()
+	--Confirm the request in context is appropriate to process
+	if string.lower(GetFieldValue("Transaction", "ProcessType")) == "lending" then
+		log:Debug("Not a borrowing request.");
+		return false;
+	end
+	
+	--User's nvtgc is in list of sites/delivery locations to process
+	local userNvtgc = AtlasHelpers.Trim(string.upper(GetFieldValue("User", "NVTGC")));
+	
+	if (not ShouldHandleRequest(userNvtgc)) then
+		log:Debug("User's NVTGC (" .. userNvtgc .. ") will not be processed.");
+		return false;
+	end
+
+	return true;
 end
 
 function TraverseError(e)
